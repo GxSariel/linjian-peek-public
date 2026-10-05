@@ -237,6 +237,11 @@ class State:
         self.watch_ai_last_reason = ""
         self.watch_ai_last_message = ""
         self.watch_ai_last_error = ""
+        self.watch_notify_last_at = 0.0
+        self.watch_guidian_last_at = 0.0
+        self.watch_action_last_at = 0.0
+        self.watch_action_last_type = ""
+        self.watch_action_last_status = ""
         self.device_states: dict[str, dict] = {}
         self.unlock_requests: list[dict] = []
         self.companion_path = self.data_dir / "companion_state.json"
@@ -440,6 +445,11 @@ def watch_status(state) -> dict:
             "ai_last_reason": state.watch_ai_last_reason,
             "ai_last_message": state.watch_ai_last_message,
             "ai_last_error": state.watch_ai_last_error,
+            "notify_last_at_ms": int(state.watch_notify_last_at * 1000) if state.watch_notify_last_at else 0,
+            "guidian_last_at_ms": int(state.watch_guidian_last_at * 1000) if state.watch_guidian_last_at else 0,
+            "action_last_at_ms": int(state.watch_action_last_at * 1000) if state.watch_action_last_at else 0,
+            "action_last_type": state.watch_action_last_type,
+            "action_last_status": state.watch_action_last_status,
         }
 
 
@@ -478,6 +488,104 @@ def _strip_json_fence(text: str) -> str:
             lines = lines[:-1]
         text = "\n".join(lines).strip()
     return text
+
+
+def execute_watch_decision(state, action: str, message: str = "") -> None:
+    action = str(action or "").strip().lower()
+    if action not in ("notify", "guidian"):
+        return
+
+    now = time.time()
+
+    if action == "notify":
+        cooldown = max(
+            60,
+            int(os.environ.get("WATCH_NOTIFY_COOLDOWN_SECONDS", "600") or 600)
+        )
+
+        with state.watch_lock:
+            last_at = float(state.watch_notify_last_at or 0)
+            if last_at and now - last_at < cooldown:
+                remaining = max(1, int(cooldown - (now - last_at)))
+                state.watch_action_last_type = "notify"
+                state.watch_action_last_status = f"cooldown:{remaining}s"
+                return
+
+            # 先占住冷却，避免同时到达的分析线程重复发通知
+            state.watch_notify_last_at = now
+            state.watch_action_last_at = now
+            state.watch_action_last_type = "notify"
+            state.watch_action_last_status = "queueing"
+
+        msg = (message or "我刚刚看了一眼，想提醒你一下。").strip()[:240]
+
+        cmd = make_command(
+            DEFAULT_DEVICE,
+            "send_notification",
+            payload={
+                "title": "掌心窗",
+                "message": msg,
+                "source": "watcher",
+            },
+        )
+
+    else:
+        cooldown = max(
+            60,
+            int(os.environ.get("WATCH_GUIDIAN_COOLDOWN_SECONDS", "1200") or 1200)
+        )
+
+        with state.watch_lock:
+            last_at = float(state.watch_guidian_last_at or 0)
+            if last_at and now - last_at < cooldown:
+                remaining = max(1, int(cooldown - (now - last_at)))
+                state.watch_action_last_type = "guidian"
+                state.watch_action_last_status = f"cooldown:{remaining}s"
+                return
+
+            state.watch_guidian_last_at = now
+            state.watch_action_last_at = now
+            state.watch_action_last_type = "guidian"
+            state.watch_action_last_status = "queueing"
+
+        cmd = make_command(
+            DEFAULT_DEVICE,
+            "trigger_guidian",
+            payload={
+                "source": "watcher",
+            },
+        )
+
+    try:
+        with state.commands_lock:
+            state.commands.append(cmd)
+            state.command_history[cmd["id"]] = dict(cmd)
+
+        try:
+            state.add_activity_event({
+                "id": cmd.get("id"),
+                "device_id": DEFAULT_DEVICE,
+                "source": "assistant",
+                "type": "notification" if action == "notify" else "command",
+                "title": "Watcher 主动提醒" if action == "notify" else "Watcher 发起归电",
+                "subtitle": message[:220] if message else "",
+                "action": cmd.get("action"),
+                "status": "pending",
+                "metadata_json": {
+                    "command_id": cmd.get("id"),
+                    "source": "watcher",
+                },
+            })
+        except Exception:
+            pass
+
+        with state.watch_lock:
+            state.watch_action_last_status = "queued"
+
+    except Exception as exc:
+        with state.watch_lock:
+            state.watch_action_last_status = "error:" + str(exc)[:160]
+
 
 
 def analyze_watch_screenshot(state, shot: Path) -> None:
@@ -537,6 +645,8 @@ def analyze_watch_screenshot(state, shot: Path) -> None:
             '"reason":"为什么作出这个判断",'
             '"message":"如果 action 不是 continue，建议发送给用户的话；否则为空字符串"}。'
             "普通、稳定、无需打扰的情况优先 continue。"
+            "只有当前确实有一句自然、具体的提醒值得发给用户时才选择 notify。"
+            "只有明显需要把用户主动叫回掌心窗时才选择 guidian；普通聊天、正常使用手机、拿不准时都选择 continue。"
             "不要复述密码、验证码、token、账号密钥或其他明显敏感字符串；"
             "如果截图出现疑似敏感信息，只概括为“页面含敏感信息”。"
         )
@@ -604,12 +714,16 @@ def analyze_watch_screenshot(state, shot: Path) -> None:
         if action not in ("continue", "notify", "guidian"):
             action = "continue"
 
+        message = str(parsed.get("message") or "")[:500]
+
         with state.watch_lock:
             state.watch_ai_last_summary = str(parsed.get("summary") or "")[:500]
             state.watch_ai_last_action = action
             state.watch_ai_last_reason = str(parsed.get("reason") or "")[:500]
-            state.watch_ai_last_message = str(parsed.get("message") or "")[:500]
+            state.watch_ai_last_message = message
             state.watch_ai_last_error = ""
+
+        execute_watch_decision(state, action, message)
 
     except HTTPError as exc:
         try:
