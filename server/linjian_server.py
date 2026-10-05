@@ -966,6 +966,338 @@ def watcher_loop(state) -> None:
         time.sleep(2)
 
 
+WATCH_CONTROL_HTML = r"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f7f3ef">
+<title>掌心窗 · 后台观察</title>
+<style>
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: #f7f3ef;
+  color: #2d3e39;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC",
+               "Microsoft YaHei", sans-serif;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.card {
+  width: min(430px, 100%);
+  background: rgba(255,255,255,.92);
+  border-radius: 24px;
+  padding: 26px 22px;
+  box-shadow: 0 10px 35px rgba(50,60,55,.10);
+}
+h1 {
+  margin: 0 0 8px;
+  font-size: 22px;
+}
+.sub {
+  color: #71847d;
+  font-size: 13px;
+  margin-bottom: 22px;
+}
+.state {
+  padding: 16px;
+  background: #f4f7f5;
+  border-radius: 16px;
+  margin-bottom: 18px;
+}
+#status {
+  font-size: 17px;
+  font-weight: 600;
+}
+#detail {
+  margin-top: 7px;
+  font-size: 12px;
+  color: #71847d;
+  line-height: 1.6;
+}
+input {
+  width: 100%;
+  border: 1px solid #d7dfdc;
+  border-radius: 13px;
+  padding: 13px 14px;
+  font-size: 14px;
+  background: white;
+  margin-bottom: 12px;
+}
+button {
+  width: 100%;
+  border: 0;
+  border-radius: 16px;
+  padding: 15px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:disabled { opacity: .55; }
+.start {
+  background: #2d5a4e;
+  color: white;
+}
+.stop {
+  background: #8d5555;
+  color: white;
+}
+.small {
+  margin-top: 10px;
+  background: #edf1ef;
+  color: #4b625b;
+  padding: 11px;
+  font-size: 13px;
+}
+.note {
+  margin-top: 17px;
+  font-size: 12px;
+  color: #84958f;
+  text-align: center;
+  line-height: 1.6;
+}
+#error {
+  color: #a24747;
+  font-size: 12px;
+  margin: 10px 2px 0;
+  min-height: 18px;
+}
+</style>
+</head>
+
+<body>
+<div class="card">
+  <h1>掌心窗 · 后台观察</h1>
+  <div class="sub">30 秒一次 · 每次运行 2 分钟</div>
+
+  <div class="state">
+    <div id="status">正在读取状态…</div>
+    <div id="detail"></div>
+  </div>
+
+  <input
+    id="token"
+    type="password"
+    placeholder="第一次填写 LINJIAN_TOKEN"
+    autocomplete="off"
+  >
+
+  <button id="toggle" class="start">开始后台观察 2 分钟</button>
+
+  <button id="refresh" class="small">刷新状态</button>
+  <button id="forget" class="small">忘记本机保存的 Token</button>
+
+  <div id="error"></div>
+
+  <div class="note">
+    Token 只保存在当前浏览器的本地存储中。<br>
+    不会写进网页地址。
+  </div>
+</div>
+
+<script>
+const KEY = "zhangxinchuang_watch_token_v1";
+
+const tokenEl = document.getElementById("token");
+const toggleEl = document.getElementById("toggle");
+const statusEl = document.getElementById("status");
+const detailEl = document.getElementById("detail");
+const errorEl = document.getElementById("error");
+
+let running = false;
+
+tokenEl.value = localStorage.getItem(KEY) || "";
+
+function saveToken() {
+  const token = tokenEl.value.trim();
+
+  if (!token) {
+    errorEl.textContent = "第一次使用请先填写 Token。";
+    return false;
+  }
+
+  localStorage.setItem(KEY, token);
+  return true;
+}
+
+async function api(path, options = {}) {
+  if (!saveToken()) return null;
+
+  errorEl.textContent = "";
+
+  const headers = {
+    "X-Auth-Token": tokenEl.value.trim(),
+    ...(options.headers || {})
+  };
+
+  if (options.method === "POST") {
+    headers["Content-Type"] = "application/json";
+  }
+
+  const response = await fetch(path, {
+    ...options,
+    headers
+  });
+
+  const raw = await response.text();
+
+  let data = {};
+  try {
+    data = JSON.parse(raw);
+  } catch (_) {
+    data = { raw };
+  }
+
+  if (!response.ok) {
+    if (response.status === 403) {
+      throw new Error("Token 不正确");
+    }
+
+    throw new Error(
+      data.error || ("服务器返回 HTTP " + response.status)
+    );
+  }
+
+  return data;
+}
+
+function renderWatch(watch) {
+  if (!watch) return;
+
+  running = !!watch.enabled;
+
+  statusEl.textContent = running
+    ? "正在后台观察"
+    : "当前未运行";
+
+  toggleEl.textContent = running
+    ? "停止后台观察"
+    : "开始后台观察 2 分钟";
+
+  toggleEl.className = running ? "stop" : "start";
+
+  const parts = [];
+
+  if (watch.interval_seconds) {
+    parts.push("间隔 " + watch.interval_seconds + " 秒");
+  }
+
+  if (typeof watch.peek_count === "number") {
+    parts.push("已观察 " + watch.peek_count + " 次");
+  }
+
+  if (typeof watch.remaining_seconds === "number" &&
+      watch.remaining_seconds > 0) {
+    parts.push("剩余约 " + Math.ceil(watch.remaining_seconds) + " 秒");
+  }
+
+  if (watch.last_skip_reason) {
+    parts.push("最近状态：" + watch.last_skip_reason);
+  }
+
+  detailEl.textContent = parts.join(" · ");
+}
+
+async function refreshStatus(silent = false) {
+  if (!tokenEl.value.trim()) {
+    statusEl.textContent = "第一次使用，请填写 Token";
+    detailEl.textContent = "";
+    return;
+  }
+
+  try {
+    const data = await api("/api/watch/status", {
+      method: "GET"
+    });
+
+    if (data) renderWatch(data.watch || data);
+  } catch (e) {
+    if (!silent) errorEl.textContent = e.message;
+  }
+}
+
+async function toggleWatch() {
+  toggleEl.disabled = true;
+
+  try {
+    let data;
+
+    if (running) {
+      data = await api("/api/watch/stop", {
+        method: "POST",
+        body: "{}"
+      });
+    } else {
+      data = await api("/api/watch/start", {
+        method: "POST",
+        body: JSON.stringify({
+          interval_seconds: 30,
+          duration_minutes: 2
+        })
+      });
+    }
+
+    if (data) {
+      renderWatch(data.watch || data);
+      await refreshStatus(true);
+    }
+
+  } catch (e) {
+    errorEl.textContent = e.message;
+  } finally {
+    toggleEl.disabled = false;
+  }
+}
+
+toggleEl.addEventListener("click", toggleWatch);
+
+document.getElementById("refresh").addEventListener(
+  "click",
+  () => refreshStatus(false)
+);
+
+document.getElementById("forget").addEventListener(
+  "click",
+  () => {
+    localStorage.removeItem(KEY);
+    tokenEl.value = "";
+    running = false;
+    statusEl.textContent = "Token 已从这个浏览器删除";
+    detailEl.textContent = "";
+    toggleEl.textContent = "开始后台观察 2 分钟";
+    toggleEl.className = "start";
+    errorEl.textContent = "";
+  }
+);
+
+tokenEl.addEventListener("change", () => {
+  if (tokenEl.value.trim()) {
+    localStorage.setItem(KEY, tokenEl.value.trim());
+    refreshStatus(false);
+  }
+});
+
+if (tokenEl.value.trim()) {
+  refreshStatus(true);
+} else {
+  statusEl.textContent = "第一次使用，请填写 Token";
+}
+
+setInterval(() => {
+  if (tokenEl.value.trim()) {
+    refreshStatus(true);
+  }
+}, 10000);
+</script>
+</body>
+</html>
+"""
+
+
 class Handler(BaseHTTPRequestHandler):
     state: State
 
@@ -1012,6 +1344,13 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         qs = parse_qs(parsed.query)
+        if path == "/watch-control":
+            self._send_bytes(
+                200,
+                WATCH_CONTROL_HTML.encode("utf-8"),
+                "text/html; charset=utf-8"
+            )
+            return
         if path in ("/", "/health"):
             self._json(200, {"ok": True, "service": "linjian-public", "name": "掌心窗", "version": VERSION, "tools": sorted(ALLOWED_ACTIONS), "guidian": True, "calendar": True, "diary": True, "diary_storage": "phone_local", "app_gate": True, "focus_tools": True, "diary_rename_fix": True, "diary_write_fallback": True, "diary_annotation_tools": True, "diary_annotation_whitelist_fix": True})
             return
