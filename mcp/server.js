@@ -1030,7 +1030,7 @@ function makeWalletTakeoutServer() {
 }
 
 function makeServer() {
-  const server = new McpServer({ name: "掌心窗", version: "0.3.9.0" });
+  const server = new McpServer({ name: "掌心窗", version: "0.3.9.1" });
   const commandBackedTools = new Set([
     "peek_screen", "get_screen_nodes", "tap_text", "input_text", "draft_xhs_comment", "xhs_comment", "send_visible_comment_after_confirmation",
     "add_guardian_calendar_event", "care_action", "trigger_guidian", "mark_guidian_returned",
@@ -1063,6 +1063,121 @@ function makeServer() {
     }
     return originalTool(...args);
   };
+
+
+  // v0.3.9.1：watcher 连续性工具靠前注册。
+  // 部分 MCP 客户端只读取前若干个 tool schema，
+  // 因此 get_watch_status / observations / pending / ack 必须提前暴露。
+
+  server.tool("get_watch_status", "读取掌心窗后台 watcher 最近一次观察结果。用于回答“你刚才看到我在干嘛”“刚刚为什么没提醒我”“你后台看到什么了”等问题。返回最近一次 Opus 屏幕理解摘要、判断、理由、建议消息和动作状态；不会主动请求新截图。", {}, async () => {
+    const res = await linjianFetch("/api/watch/status");
+    const data = await res.json();
+
+    const watch = data?.watch || {};
+
+    return textResult({
+      ok: Boolean(data?.ok),
+      enabled: Boolean(watch.enabled),
+      interval_seconds: watch.interval_seconds || 0,
+      remaining_seconds: watch.remaining_seconds || 0,
+
+      observed_at_ms: watch.ai_last_at_ms || 0,
+      summary: watch.ai_last_summary || "",
+      decision: watch.ai_last_action || "",
+      reason: watch.ai_last_reason || "",
+      suggested_message: watch.ai_last_message || "",
+      ai_error: watch.ai_last_error || "",
+
+      last_action_type: watch.action_last_type || "",
+      last_action_status: watch.action_last_status || "",
+      notify_last_at_ms: watch.notify_last_at_ms || 0,
+      guidian_last_at_ms: watch.guidian_last_at_ms || 0,
+
+      note: "这是后台 watcher 最近一次已经完成的观察结果，不会为了读取状态再次截图。"
+    });
+  });
+
+  server.tool(
+    "get_recent_watch_observations",
+    "读取后台 watcher 最近已经完成的观察历史。用于用户问“刚才都看到什么了”“我不在聊天的时候你看到了什么”“最近后台发生了什么”等情况。只返回 Opus 压缩后的摘要、理由、动作和建议消息，不返回截图原文。读取本身不会生成新截图，也不会把记录标记为已读。",
+    {
+      limit: z.number().int().min(1).max(50).default(10),
+      pending_only: z.boolean().default(false)
+    },
+    async ({ limit = 10, pending_only = false }) => {
+      const q = new URLSearchParams();
+      q.set("limit", String(limit));
+      q.set("pending_only", pending_only ? "1" : "0");
+
+      const res = await linjianFetch(
+        `/api/watch/observations?${q.toString()}`,
+        { timeout_ms: QUICK_FETCH_TIMEOUT_MS }
+      );
+      const data = await res.json();
+
+      return textResult({
+        ok: Boolean(data?.ok),
+        count: Number(data?.count || 0),
+        observations: Array.isArray(data?.observations)
+          ? data.observations
+          : [],
+        note: "这是 watcher 已经完成的后台见闻历史；不会因为读取而重新截图。"
+      });
+    }
+  );
+
+  server.tool(
+    "get_pending_watch_message",
+    "检查后台 watcher 是否有一条尚未在聊天中接续的见闻。当用户重新出现、说“我回来了”、新开聊天窗口，或正常发来消息而你需要恢复后台连续性时，应优先调用本工具。若 has_pending=true，请把 observation 当作刚才后台发生过的上下文自然接续；不要机械复述字段，也不要声称自己持续实时观看。接续完成后再调用 ack_watch_message。",
+    {},
+    async () => {
+      const res = await linjianFetch(
+        "/api/watch/pending",
+        { timeout_ms: QUICK_FETCH_TIMEOUT_MS }
+      );
+      const data = await res.json();
+
+      return textResult({
+        ok: Boolean(data?.ok),
+        has_pending: Boolean(data?.has_pending),
+        observation: data?.observation || null,
+        note: data?.has_pending
+          ? "有尚未接续的后台见闻。自然回应后，再调用 ack_watch_message。"
+          : "目前没有尚未接续的后台见闻。"
+      });
+    }
+  );
+
+  server.tool(
+    "ack_watch_message",
+    "把一条已经在聊天里自然接续过的 watcher 后台见闻标记为已读。只有在你已经理解并实际回应了该 pending observation 后才调用；不要一读取就立刻 ack。id 可传 get_pending_watch_message 返回的 observation.id；留空时由服务器确认当前最早匹配的 pending。",
+    {
+      id: z.string().default("")
+    },
+    async ({ id = "" }) => {
+      const res = await linjianFetch(
+        "/api/watch/ack",
+        {
+          method: "POST",
+          timeout_ms: QUICK_FETCH_TIMEOUT_MS,
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ id })
+        }
+      );
+
+      const data = await res.json();
+
+      return textResult({
+        ok: Boolean(data?.ok),
+        observation: data?.observation || null,
+        note: data?.ok
+          ? "这条后台见闻已经标记为接续完成，后续不会再作为 pending 重复出现。"
+          : "没有成功标记该后台见闻。"
+      }, !data?.ok);
+    }
+  );
 
 
   // v0.3.8.2：专注模式工具靠前注册，避免部分客户端只读取前若干个 schema 时漏掉接口。
@@ -1199,116 +1314,6 @@ function makeServer() {
       { type: "image", data: img.data, mimeType: img.mimeType }
     ], false, { ok: true, filename: info.filename || "latest", mtime: info.mtime || "", size: info.size || img.bytes, content_type: img.mimeType, source: "latest_screen" });
   });
-
-  server.tool("get_watch_status", "读取掌心窗后台 watcher 最近一次观察结果。用于回答“你刚才看到我在干嘛”“刚刚为什么没提醒我”“你后台看到什么了”等问题。返回最近一次 Opus 屏幕理解摘要、判断、理由、建议消息和动作状态；不会主动请求新截图。", {}, async () => {
-    const res = await linjianFetch("/api/watch/status");
-    const data = await res.json();
-
-    const watch = data?.watch || {};
-
-    return textResult({
-      ok: Boolean(data?.ok),
-      enabled: Boolean(watch.enabled),
-      interval_seconds: watch.interval_seconds || 0,
-      remaining_seconds: watch.remaining_seconds || 0,
-
-      observed_at_ms: watch.ai_last_at_ms || 0,
-      summary: watch.ai_last_summary || "",
-      decision: watch.ai_last_action || "",
-      reason: watch.ai_last_reason || "",
-      suggested_message: watch.ai_last_message || "",
-      ai_error: watch.ai_last_error || "",
-
-      last_action_type: watch.action_last_type || "",
-      last_action_status: watch.action_last_status || "",
-      notify_last_at_ms: watch.notify_last_at_ms || 0,
-      guidian_last_at_ms: watch.guidian_last_at_ms || 0,
-
-      note: "这是后台 watcher 最近一次已经完成的观察结果，不会为了读取状态再次截图。"
-    });
-  });
-
-  server.tool(
-    "get_recent_watch_observations",
-    "读取后台 watcher 最近已经完成的观察历史。用于用户问“刚才都看到什么了”“我不在聊天的时候你看到了什么”“最近后台发生了什么”等情况。只返回 Opus 压缩后的摘要、理由、动作和建议消息，不返回截图原文。读取本身不会生成新截图，也不会把记录标记为已读。",
-    {
-      limit: z.number().int().min(1).max(50).default(10),
-      pending_only: z.boolean().default(false)
-    },
-    async ({ limit = 10, pending_only = false }) => {
-      const q = new URLSearchParams();
-      q.set("limit", String(limit));
-      q.set("pending_only", pending_only ? "1" : "0");
-
-      const res = await linjianFetch(
-        `/api/watch/observations?${q.toString()}`,
-        { timeout_ms: QUICK_FETCH_TIMEOUT_MS }
-      );
-      const data = await res.json();
-
-      return textResult({
-        ok: Boolean(data?.ok),
-        count: Number(data?.count || 0),
-        observations: Array.isArray(data?.observations)
-          ? data.observations
-          : [],
-        note: "这是 watcher 已经完成的后台见闻历史；不会因为读取而重新截图。"
-      });
-    }
-  );
-
-  server.tool(
-    "get_pending_watch_message",
-    "检查后台 watcher 是否有一条尚未在聊天中接续的见闻。当用户重新出现、说“我回来了”、新开聊天窗口，或正常发来消息而你需要恢复后台连续性时，应优先调用本工具。若 has_pending=true，请把 observation 当作刚才后台发生过的上下文自然接续；不要机械复述字段，也不要声称自己持续实时观看。接续完成后再调用 ack_watch_message。",
-    {},
-    async () => {
-      const res = await linjianFetch(
-        "/api/watch/pending",
-        { timeout_ms: QUICK_FETCH_TIMEOUT_MS }
-      );
-      const data = await res.json();
-
-      return textResult({
-        ok: Boolean(data?.ok),
-        has_pending: Boolean(data?.has_pending),
-        observation: data?.observation || null,
-        note: data?.has_pending
-          ? "有尚未接续的后台见闻。自然回应后，再调用 ack_watch_message。"
-          : "目前没有尚未接续的后台见闻。"
-      });
-    }
-  );
-
-  server.tool(
-    "ack_watch_message",
-    "把一条已经在聊天里自然接续过的 watcher 后台见闻标记为已读。只有在你已经理解并实际回应了该 pending observation 后才调用；不要一读取就立刻 ack。id 可传 get_pending_watch_message 返回的 observation.id；留空时由服务器确认当前最早匹配的 pending。",
-    {
-      id: z.string().default("")
-    },
-    async ({ id = "" }) => {
-      const res = await linjianFetch(
-        "/api/watch/ack",
-        {
-          method: "POST",
-          timeout_ms: QUICK_FETCH_TIMEOUT_MS,
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({ id })
-        }
-      );
-
-      const data = await res.json();
-
-      return textResult({
-        ok: Boolean(data?.ok),
-        observation: data?.observation || null,
-        note: data?.ok
-          ? "这条后台见闻已经标记为接续完成，后续不会再作为 pending 重复出现。"
-          : "没有成功标记该后台见闻。"
-      }, !data?.ok);
-    }
-  );
 
   server.tool("linjian_status", "检查掌心窗后端是否在线，以及 MCP 是否配置了 LINJIAN_URL 和 LINJIAN_TOKEN。当用户在聊天里提到掌心窗报错、出错、有点问题、连接不上、没反应、配置异常、Render/MCP/Token/URL 相关问题时，陪伴对象应主动调用。", {}, async () => {
     const configErrors = [];
