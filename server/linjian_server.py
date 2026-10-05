@@ -956,6 +956,22 @@ class Handler(BaseHTTPRequestHandler):
             if not self._require_token(): return
             data = self._read_json()
             self._json(200, resolve_jd_share_link(data.get("url") or data.get("link") or "", data.get("item_query") or data.get("query") or "")); return
+        if path == "/api/watch/test-action":
+            if not self._require_token(): return
+            data = self._read_json()
+            action = str(data.get("action") or "").strip().lower()
+            message = str(data.get("message") or "").strip()
+
+            if action not in ("notify", "guidian"):
+                self._json(400, {"ok": False, "error": "action_must_be_notify_or_guidian"}); return
+
+            execute_watch_decision(self.state, action, message)
+            self._json(200, {
+                "ok": True,
+                "tested_action": action,
+                "watch": watch_status(self.state),
+            }); return
+
         if path == "/api/watch/start":
             if not self._require_token(): return
             data = self._read_json()
