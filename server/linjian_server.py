@@ -236,6 +236,7 @@ class State:
         self.watch_ai_last_action = ""
         self.watch_ai_last_reason = ""
         self.watch_ai_last_message = ""
+        self.watch_ai_visible_text_sample = ""
         self.watch_ai_last_error = ""
         self.watch_notify_last_at = 0.0
         self.watch_guidian_last_at = 0.0
@@ -444,6 +445,7 @@ def watch_status(state) -> dict:
             "ai_last_action": state.watch_ai_last_action,
             "ai_last_reason": state.watch_ai_last_reason,
             "ai_last_message": state.watch_ai_last_message,
+            "ai_visible_text_sample": state.watch_ai_visible_text_sample,
             "ai_last_error": state.watch_ai_last_error,
             "notify_last_at_ms": int(state.watch_notify_last_at * 1000) if state.watch_notify_last_at else 0,
             "guidian_last_at_ms": int(state.watch_guidian_last_at * 1000) if state.watch_guidian_last_at else 0,
@@ -643,6 +645,7 @@ def analyze_watch_screenshot(state, shot: Path) -> None:
             '格式为：{"action":"continue|notify|guidian",'
             '"summary":"一句到两句描述当前正在发生什么",'
             '"reason":"为什么作出这个判断",'
+            '"visible_text_sample":"从截图正文中逐字抄一段最有辨识度的可见文字，最多80字；看不清则为空字符串；严禁根据应用名、包名或上一轮摘要推测",'
             '"message":"如果 action 不是 continue，建议发送给用户的话；否则为空字符串"}。'
             "普通、稳定、无需打扰的情况优先 continue。"
             "只有当前确实有一句自然、具体的提醒值得发给用户时才选择 notify。"
@@ -715,12 +718,14 @@ def analyze_watch_screenshot(state, shot: Path) -> None:
             action = "continue"
 
         message = str(parsed.get("message") or "")[:500]
+        visible_text_sample = str(parsed.get("visible_text_sample") or "")[:200]
 
         with state.watch_lock:
             state.watch_ai_last_summary = str(parsed.get("summary") or "")[:500]
             state.watch_ai_last_action = action
             state.watch_ai_last_reason = str(parsed.get("reason") or "")[:500]
             state.watch_ai_last_message = message
+            state.watch_ai_visible_text_sample = visible_text_sample
             state.watch_ai_last_error = ""
 
         execute_watch_decision(state, action, message)
