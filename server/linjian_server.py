@@ -862,17 +862,34 @@ def analyze_watch_screenshot(state, shot: Path) -> None:
 
         try:
             phone_state = state.device_states.get(DEFAULT_DEVICE) or {}
+            current_package = str(phone_state.get("current_package") or "")
+
+            # 原有主动提醒语义继续保留：
+            # notify / guidian / 明确 message 仍然产生 pending。
+            action_pending = (
+                action in ("notify", "guidian")
+                or bool((message or "").strip())
+            )
+
+            # 连续性 pending：
+            # 即使 action=continue，只要看到了新的非空摘要，
+            # 也留给下一次聊天接续。
+            # RikkaHub 自己的画面不产生这种 continuity pending，
+            # 避免“看见自己正在读 pending -> 再制造 pending”的循环。
+            continuity_pending = (
+                current_package != "me.rerere.rikkahub"
+                and bool((summary or "").strip())
+                and (summary or "").strip() != (previous_summary or "").strip()
+            )
+
             state.add_watch_observation(
                 app=str(phone_state.get("current_app") or ""),
-                package=str(phone_state.get("current_package") or ""),
+                package=current_package,
                 summary=summary,
                 reason=reason,
                 action=action,
                 message=message,
-                pending=(
-                    action in ("notify", "guidian")
-                    or bool((message or "").strip())
-                ),
+                pending=(action_pending or continuity_pending),
             )
         except Exception as exc:
             with state.watch_lock:
