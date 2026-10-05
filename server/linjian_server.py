@@ -243,6 +243,11 @@ class State:
         self.watch_action_last_at = 0.0
         self.watch_action_last_type = ""
         self.watch_action_last_status = ""
+
+        # watcher 后台见闻：只保存压缩后的摘要，不保存截图正文
+        self.watch_observations_path = self.data_dir / "watch_observations.json"
+        self.watch_observations_lock = Lock()
+        self.watch_observations = self._load_watch_observations()
         self.device_states: dict[str, dict] = {}
         self.unlock_requests: list[dict] = []
         self.companion_path = self.data_dir / "companion_state.json"
@@ -379,6 +384,114 @@ class State:
                 "status": entry["status"], "metadata_json": data.get("metadata_json") or {}
             }, int(data.get("dedupe_seconds") or 0))
         return entry
+
+    def _load_watch_observations(self) -> list[dict]:
+        try:
+            if self.watch_observations_path.exists():
+                loaded = json.loads(
+                    self.watch_observations_path.read_text(encoding="utf-8")
+                )
+                if isinstance(loaded, list):
+                    return loaded[:200]
+        except Exception:
+            pass
+        return []
+
+    def _save_watch_observations_unlocked(self) -> None:
+        self.watch_observations_path.parent.mkdir(parents=True, exist_ok=True)
+        temp = self.watch_observations_path.with_suffix(".tmp")
+        temp.write_text(
+            json.dumps(
+                self.watch_observations[:200],
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        temp.replace(self.watch_observations_path)
+
+    def add_watch_observation(
+        self,
+        *,
+        app: str = "",
+        package: str = "",
+        summary: str = "",
+        reason: str = "",
+        action: str = "continue",
+        message: str = "",
+        pending: bool = False,
+    ) -> dict:
+        entry = {
+            "id": "watch-" + str(uuid.uuid4()),
+            "created_at": now_iso(),
+            "created_at_ms": int(time.time() * 1000),
+            "app": (app or "")[:120],
+            "package": (package or "")[:200],
+            "summary": (summary or "")[:1000],
+            "reason": (reason or "")[:1000],
+            "action": (action or "continue")[:40],
+            "message": (message or "")[:1000],
+            "pending": bool(pending),
+            "consumed": False,
+            "consumed_at": "",
+        }
+
+        with self.watch_observations_lock:
+            self.watch_observations.insert(0, entry)
+            self.watch_observations = self.watch_observations[:200]
+            self._save_watch_observations_unlocked()
+
+        return dict(entry)
+
+    def get_watch_observations(
+        self,
+        limit: int = 10,
+        pending_only: bool = False,
+    ) -> list[dict]:
+        limit = max(1, min(50, int(limit or 10)))
+
+        with self.watch_observations_lock:
+            items = list(self.watch_observations)
+
+        if pending_only:
+            items = [
+                x for x in items
+                if x.get("pending") and not x.get("consumed")
+            ]
+
+        return [dict(x) for x in items[:limit]]
+
+    def get_pending_watch_observation(self) -> dict | None:
+        with self.watch_observations_lock:
+            for item in self.watch_observations:
+                if item.get("pending") and not item.get("consumed"):
+                    return dict(item)
+        return None
+
+    def ack_watch_observation(self, observation_id: str = "") -> dict | None:
+        observation_id = (observation_id or "").strip()
+
+        with self.watch_observations_lock:
+            target = None
+
+            for item in self.watch_observations:
+                if observation_id:
+                    if item.get("id") == observation_id:
+                        target = item
+                        break
+                elif item.get("pending") and not item.get("consumed"):
+                    target = item
+                    break
+
+            if target is None:
+                return None
+
+            target["consumed"] = True
+            target["pending"] = False
+            target["consumed_at"] = now_iso()
+            self._save_watch_observations_unlocked()
+            return dict(target)
+
 
     def latest_shot(self) -> Path | None:
         shots = sorted(self.shots_dir.glob("peek_*"), key=lambda p: p.stat().st_mtime)
@@ -747,6 +860,27 @@ def analyze_watch_screenshot(state, shot: Path) -> None:
             state.watch_ai_visible_text_sample = visible_text_sample
             state.watch_ai_last_error = ""
 
+        try:
+            phone_state = state.device_states.get(DEFAULT_DEVICE) or {}
+            state.add_watch_observation(
+                app=str(phone_state.get("current_app") or ""),
+                package=str(phone_state.get("current_package") or ""),
+                summary=summary,
+                reason=reason,
+                action=action,
+                message=message,
+                pending=(
+                    action in ("notify", "guidian")
+                    or bool((message or "").strip())
+                ),
+            )
+        except Exception as exc:
+            with state.watch_lock:
+                state.watch_ai_last_error = (
+                    state.watch_ai_last_error
+                    or ("observation_save_error:" + str(exc)[:160])
+                )
+
         execute_watch_decision(state, action, message)
 
     except HTTPError as exc:
@@ -946,6 +1080,55 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/appgate/unlock_requests":
             if not self._require_token(): return
             self._json(200, {"ok": True, "requests": self.state.unlock_requests[-50:]}); return
+        if path == "/api/watch/observations":
+            if not self._require_token(): return
+            try:
+                limit = max(
+                    1,
+                    min(
+                        50,
+                        int(qs.get("limit", ["10"])[0] or 10),
+                    ),
+                )
+            except Exception:
+                limit = 10
+
+            pending_raw = (
+                qs.get("pending_only", ["0"])[0] or "0"
+            ).strip().lower()
+
+            pending_only = pending_raw in (
+                "1", "true", "yes", "on"
+            )
+
+            items = self.state.get_watch_observations(
+                limit=limit,
+                pending_only=pending_only,
+            )
+
+            self._json(
+                200,
+                {
+                    "ok": True,
+                    "count": len(items),
+                    "observations": items,
+                },
+            )
+            return
+
+        if path == "/api/watch/pending":
+            if not self._require_token(): return
+            item = self.state.get_pending_watch_observation()
+            self._json(
+                200,
+                {
+                    "ok": True,
+                    "has_pending": bool(item),
+                    "observation": item,
+                },
+            )
+            return
+
         if path == "/api/watch/status":
             if not self._require_token(): return
             self._json(200, {"ok": True, "watch": watch_status(self.state)}); return
@@ -980,6 +1163,39 @@ class Handler(BaseHTTPRequestHandler):
             if not self._require_token(): return
             data = self._read_json()
             self._json(200, resolve_jd_share_link(data.get("url") or data.get("link") or "", data.get("item_query") or data.get("query") or "")); return
+        if path == "/api/watch/ack":
+            if not self._require_token(): return
+
+            data = self._read_json()
+            observation_id = (
+                data.get("id")
+                or data.get("observation_id")
+                or ""
+            )
+
+            item = self.state.ack_watch_observation(
+                observation_id
+            )
+
+            if item is None:
+                self._json(
+                    404,
+                    {
+                        "ok": False,
+                        "error": "watch_observation_not_found",
+                    },
+                )
+                return
+
+            self._json(
+                200,
+                {
+                    "ok": True,
+                    "observation": item,
+                },
+            )
+            return
+
         if path == "/api/watch/test-action":
             if not self._require_token(): return
             data = self._read_json()
