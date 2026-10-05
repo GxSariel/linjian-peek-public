@@ -18,7 +18,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
@@ -221,6 +221,15 @@ class State:
         self.commands: list[dict] = []
         self.command_history: dict[str, dict] = {}
         self.commands_lock = Lock()
+        self.watch_lock = Lock()
+        self.watch_enabled = False
+        self.watch_interval_seconds = 120
+        self.watch_started_at = 0.0
+        self.watch_end_at = 0.0
+        self.watch_last_peek_at = 0.0
+        self.watch_peek_count = 0
+        self.watch_last_command_id = ""
+        self.watch_last_skip_reason = ""
         self.device_states: dict[str, dict] = {}
         self.unlock_requests: list[dict] = []
         self.companion_path = self.data_dir / "companion_state.json"
@@ -402,6 +411,116 @@ def clip_text(value: str, limit: int = 1200) -> str:
     return value[:limit].rstrip() + "…"
 
 
+def watch_status(state) -> dict:
+    now = time.time()
+    with state.watch_lock:
+        enabled = bool(state.watch_enabled)
+        end_at = float(state.watch_end_at or 0)
+        remaining = max(0, int(end_at - now)) if enabled and end_at else 0
+        return {
+            "enabled": enabled,
+            "interval_seconds": int(state.watch_interval_seconds),
+            "started_at_ms": int(state.watch_started_at * 1000) if state.watch_started_at else 0,
+            "end_at_ms": int(end_at * 1000) if end_at else 0,
+            "remaining_seconds": remaining,
+            "last_peek_at_ms": int(state.watch_last_peek_at * 1000) if state.watch_last_peek_at else 0,
+            "peek_count": int(state.watch_peek_count),
+            "last_command_id": state.watch_last_command_id,
+            "last_skip_reason": state.watch_last_skip_reason,
+        }
+
+
+def start_watch(state, interval_seconds: int = 120, duration_minutes: int = 30) -> dict:
+    interval_seconds = max(30, min(3600, int(interval_seconds)))
+    duration_minutes = max(1, min(720, int(duration_minutes)))
+    now = time.time()
+
+    with state.watch_lock:
+        state.watch_enabled = True
+        state.watch_interval_seconds = interval_seconds
+        state.watch_started_at = now
+        state.watch_end_at = now + duration_minutes * 60
+        state.watch_last_peek_at = 0.0
+        state.watch_peek_count = 0
+        state.watch_last_command_id = ""
+        state.watch_last_skip_reason = ""
+
+    return watch_status(state)
+
+
+def stop_watch(state) -> dict:
+    with state.watch_lock:
+        state.watch_enabled = False
+        state.watch_last_skip_reason = "stopped_by_user"
+    return watch_status(state)
+
+
+def watcher_loop(state) -> None:
+    while True:
+        try:
+            now = time.time()
+            should_check = False
+
+            with state.watch_lock:
+                if state.watch_enabled:
+                    if state.watch_end_at and now >= state.watch_end_at:
+                        state.watch_enabled = False
+                        state.watch_last_skip_reason = "duration_finished"
+                    elif (
+                        state.watch_last_peek_at <= 0
+                        or now - state.watch_last_peek_at >= state.watch_interval_seconds
+                    ):
+                        state.watch_last_peek_at = now
+                        should_check = True
+
+            if should_check:
+                device_state = state.device_states.get(DEFAULT_DEVICE) or {}
+                screen_on = device_state.get("screen_on")
+                current_package = str(device_state.get("current_package") or "")
+
+                if screen_on is False:
+                    with state.watch_lock:
+                        state.watch_last_skip_reason = "screen_off"
+
+                elif current_package in SENSITIVE_PACKAGES:
+                    with state.watch_lock:
+                        state.watch_last_skip_reason = "sensitive_package"
+
+                else:
+                    cmd = make_command(
+                        DEFAULT_DEVICE,
+                        "peek",
+                        payload={"source": "watcher"},
+                    )
+
+                    queued = False
+                    with state.commands_lock:
+                        pending_peeks = sum(
+                            1 for c in state.commands
+                            if c.get("action") == "peek"
+                            and c.get("status") == "pending"
+                        )
+
+                        if pending_peeks < 3:
+                            state.commands.append(cmd)
+                            state.command_history[cmd["id"]] = dict(cmd)
+                            queued = True
+
+                    with state.watch_lock:
+                        if queued:
+                            state.watch_peek_count += 1
+                            state.watch_last_command_id = cmd["id"]
+                            state.watch_last_skip_reason = ""
+                        else:
+                            state.watch_last_skip_reason = "peek_queue_full"
+
+        except Exception as exc:
+            with state.watch_lock:
+                state.watch_last_skip_reason = "watcher_error:" + str(exc)[:120]
+
+        time.sleep(2)
+
+
 class Handler(BaseHTTPRequestHandler):
     state: State
 
@@ -516,6 +635,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/appgate/unlock_requests":
             if not self._require_token(): return
             self._json(200, {"ok": True, "requests": self.state.unlock_requests[-50:]}); return
+        if path == "/api/watch/status":
+            if not self._require_token(): return
+            self._json(200, {"ok": True, "watch": watch_status(self.state)}); return
+
         if path == "/api/known_apps":
             self._json(200, {"ok": True, "apps": KNOWN_APPS}); return
         self._json(404, {"ok": False, "error": ERR_BAD_METHOD})
@@ -546,6 +669,21 @@ class Handler(BaseHTTPRequestHandler):
             if not self._require_token(): return
             data = self._read_json()
             self._json(200, resolve_jd_share_link(data.get("url") or data.get("link") or "", data.get("item_query") or data.get("query") or "")); return
+        if path == "/api/watch/start":
+            if not self._require_token(): return
+            data = self._read_json()
+            try:
+                interval_seconds = int(data.get("interval_seconds") or 120)
+                duration_minutes = int(data.get("duration_minutes") or 30)
+            except (TypeError, ValueError):
+                self._json(400, {"ok": False, "error": "invalid_watch_settings"}); return
+            watch = start_watch(self.state, interval_seconds, duration_minutes)
+            self._json(200, {"ok": True, "watch": watch}); return
+
+        if path == "/api/watch/stop":
+            if not self._require_token(): return
+            self._json(200, {"ok": True, "watch": stop_watch(self.state)}); return
+
         if path == "/api/peek":
             if not self._require_token(): return
             self._queue(make_command(DEFAULT_DEVICE, "peek")); self._json(200, {"ok": True, "queued": True}); return
@@ -653,6 +791,12 @@ def main() -> None:
         sys.stderr.write("拒绝启动：请先设置 LINJIAN_TOKEN 为长随机密钥。\n")
         sys.exit(1)
     Handler.state = state
+    Thread(
+        target=watcher_loop,
+        args=(state,),
+        daemon=True,
+        name="linjian-watcher",
+    ).start()
     httpd = ThreadingHTTPServer((state.host, state.port), Handler)
     print("=" * 56)
     print(f"  掌心窗 unified v{VERSION}")
