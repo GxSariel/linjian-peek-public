@@ -1200,6 +1200,34 @@ function makeServer() {
     ], false, { ok: true, filename: info.filename || "latest", mtime: info.mtime || "", size: info.size || img.bytes, content_type: img.mimeType, source: "latest_screen" });
   });
 
+  server.tool("get_watch_status", "读取掌心窗后台 watcher 最近一次观察结果。用于回答“你刚才看到我在干嘛”“刚刚为什么没提醒我”“你后台看到什么了”等问题。返回最近一次 Opus 屏幕理解摘要、判断、理由、建议消息和动作状态；不会主动请求新截图。", {}, async () => {
+    const res = await linjianFetch("/api/watch/status");
+    const data = await res.json();
+
+    const watch = data?.watch || {};
+
+    return textResult({
+      ok: Boolean(data?.ok),
+      enabled: Boolean(watch.enabled),
+      interval_seconds: watch.interval_seconds || 0,
+      remaining_seconds: watch.remaining_seconds || 0,
+
+      observed_at_ms: watch.ai_last_at_ms || 0,
+      summary: watch.ai_last_summary || "",
+      decision: watch.ai_last_action || "",
+      reason: watch.ai_last_reason || "",
+      suggested_message: watch.ai_last_message || "",
+      ai_error: watch.ai_last_error || "",
+
+      last_action_type: watch.action_last_type || "",
+      last_action_status: watch.action_last_status || "",
+      notify_last_at_ms: watch.notify_last_at_ms || 0,
+      guidian_last_at_ms: watch.guidian_last_at_ms || 0,
+
+      note: "这是后台 watcher 最近一次已经完成的观察结果，不会为了读取状态再次截图。"
+    });
+  });
+
   server.tool("linjian_status", "检查掌心窗后端是否在线，以及 MCP 是否配置了 LINJIAN_URL 和 LINJIAN_TOKEN。当用户在聊天里提到掌心窗报错、出错、有点问题、连接不上、没反应、配置异常、Render/MCP/Token/URL 相关问题时，陪伴对象应主动调用。", {}, async () => {
     const configErrors = [];
     if (!LINJIAN_URL_CANDIDATES.length) configErrors.push("Missing env LINJIAN_URL");
