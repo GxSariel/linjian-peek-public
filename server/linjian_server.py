@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import base64
 import calendar
 import json
 import os
@@ -230,6 +231,12 @@ class State:
         self.watch_peek_count = 0
         self.watch_last_command_id = ""
         self.watch_last_skip_reason = ""
+        self.watch_ai_last_at = 0.0
+        self.watch_ai_last_summary = ""
+        self.watch_ai_last_action = ""
+        self.watch_ai_last_reason = ""
+        self.watch_ai_last_message = ""
+        self.watch_ai_last_error = ""
         self.device_states: dict[str, dict] = {}
         self.unlock_requests: list[dict] = []
         self.companion_path = self.data_dir / "companion_state.json"
@@ -427,6 +434,12 @@ def watch_status(state) -> dict:
             "peek_count": int(state.watch_peek_count),
             "last_command_id": state.watch_last_command_id,
             "last_skip_reason": state.watch_last_skip_reason,
+            "ai_last_at_ms": int(state.watch_ai_last_at * 1000) if state.watch_ai_last_at else 0,
+            "ai_last_summary": state.watch_ai_last_summary,
+            "ai_last_action": state.watch_ai_last_action,
+            "ai_last_reason": state.watch_ai_last_reason,
+            "ai_last_message": state.watch_ai_last_message,
+            "ai_last_error": state.watch_ai_last_error,
         }
 
 
@@ -455,6 +468,162 @@ def stop_watch(state) -> dict:
     return watch_status(state)
 
 
+def _strip_json_fence(text: str) -> str:
+    text = (text or "").strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines:
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    return text
+
+
+def analyze_watch_screenshot(state, shot: Path) -> None:
+    api_key = os.environ.get("LINKS_API_KEY", "").strip()
+    base_url = os.environ.get("LINKS_BASE_URL", "https://linksapi.cn/v1").strip().rstrip("/")
+    model = os.environ.get("LINKS_MODEL", "claude-opus-4-6").strip()
+    min_interval = max(30, int(os.environ.get("WATCH_AI_INTERVAL_SECONDS", "120") or 120))
+
+    if not api_key:
+        with state.watch_lock:
+            state.watch_ai_last_error = "LINKS_API_KEY_missing"
+        return
+
+    now = time.time()
+
+    with state.watch_lock:
+        if not state.watch_enabled:
+            return
+        if state.watch_ai_last_at and now - state.watch_ai_last_at < min_interval:
+            return
+        state.watch_ai_last_at = now
+        previous_summary = state.watch_ai_last_summary
+
+    device_state = state.device_states.get(DEFAULT_DEVICE) or {}
+    current_package = str(device_state.get("current_package") or "").strip()
+    current_app = str(device_state.get("current_app") or "").strip()
+
+    # 隐私闸门：不知道当前 App 时，不把截图发给模型。
+    if not current_package:
+        with state.watch_lock:
+            state.watch_ai_last_error = "unknown_current_package"
+        return
+
+    blocked = set(SENSITIVE_PACKAGES)
+    blocked.update(
+        x.strip()
+        for x in os.environ.get("WATCH_BLOCKED_PACKAGES", "").split(",")
+        if x.strip()
+    )
+    if current_package in blocked:
+        with state.watch_lock:
+            state.watch_ai_last_error = "blocked_package"
+        return
+
+    try:
+        raw = shot.read_bytes()
+        mime = "image/png" if shot.suffix.lower() == ".png" else "image/jpeg"
+        data_url = "data:" + mime + ";base64," + base64.b64encode(raw).decode("ascii")
+
+        prompt = (
+            "你在一个由用户本人明确开启的手机屏幕观察器中工作。"
+            "只根据当前截图和提供的上一轮摘要判断，不要臆测截图之外的事实。"
+            "现在只做观察和判断，不真正执行手机动作。"
+            "必须只输出一个 JSON 对象，不要 Markdown，不要代码围栏。"
+            '格式为：{"action":"continue|notify|guidian",'
+            '"summary":"一句到两句描述当前正在发生什么",'
+            '"reason":"为什么作出这个判断",'
+            '"message":"如果 action 不是 continue，建议发送给用户的话；否则为空字符串"}。'
+            "普通、稳定、无需打扰的情况优先 continue。"
+            "不要复述密码、验证码、token、账号密钥或其他明显敏感字符串；"
+            "如果截图出现疑似敏感信息，只概括为“页面含敏感信息”。"
+        )
+
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": prompt,
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                f"当前应用：{current_app or '未知名称'}\n"
+                                f"当前包名：{current_package}\n"
+                                f"上一轮摘要：{previous_summary or '无'}"
+                            ),
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": data_url
+                            },
+                        },
+                    ],
+                },
+            ],
+            "max_tokens": 500,
+            "temperature": 0.2,
+        }
+
+        req = Request(
+            base_url + "/chat/completions",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": "Bearer " + api_key,
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+
+        with urlopen(req, timeout=90) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+
+        content = (
+            result.get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+        )
+
+        if isinstance(content, list):
+            content = "".join(
+                str(x.get("text") or "")
+                for x in content
+                if isinstance(x, dict)
+            )
+
+        parsed = json.loads(_strip_json_fence(str(content)))
+
+        action = str(parsed.get("action") or "continue").strip().lower()
+        if action not in ("continue", "notify", "guidian"):
+            action = "continue"
+
+        with state.watch_lock:
+            state.watch_ai_last_summary = str(parsed.get("summary") or "")[:500]
+            state.watch_ai_last_action = action
+            state.watch_ai_last_reason = str(parsed.get("reason") or "")[:500]
+            state.watch_ai_last_message = str(parsed.get("message") or "")[:500]
+            state.watch_ai_last_error = ""
+
+    except HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            detail = ""
+        with state.watch_lock:
+            state.watch_ai_last_error = f"HTTP_{exc.code}: {detail[:300]}"
+
+    except Exception as exc:
+        with state.watch_lock:
+            state.watch_ai_last_error = str(exc)[:300]
+
+
 def watcher_loop(state) -> None:
     while True:
         try:
@@ -481,6 +650,10 @@ def watcher_loop(state) -> None:
                 if screen_on is False:
                     with state.watch_lock:
                         state.watch_last_skip_reason = "screen_off"
+
+                elif not current_package:
+                    with state.watch_lock:
+                        state.watch_last_skip_reason = "unknown_current_package"
 
                 elif current_package in SENSITIVE_PACKAGES:
                     with state.watch_lock:
@@ -782,6 +955,16 @@ class Handler(BaseHTTPRequestHandler):
         if self.state.hook:
             try: subprocess.Popen([*self.state.hook.split(), str(dest.resolve())], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception as exc: self.log_message("hook failed: %s", exc)
+
+        # watcher 开启时，把新截图异步交给 Opus 分析；不阻塞手机上传请求。
+        if self.state.watch_enabled:
+            Thread(
+                target=analyze_watch_screenshot,
+                args=(self.state, dest),
+                daemon=True,
+                name="linjian-watch-ai",
+            ).start()
+
         self._json(200, {"ok": True, "filename": dest.name, "size": len(data)})
 
 
