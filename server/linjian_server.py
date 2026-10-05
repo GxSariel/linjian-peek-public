@@ -983,332 +983,345 @@ def watcher_loop(state) -> None:
         time.sleep(2)
 
 
-WATCH_CONTROL_HTML = r"""<!doctype html>
+WATCH_CONTROL_HTML = r"""
+<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#f7f3ef">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>掌心窗 · 后台观察</title>
 <style>
-* { box-sizing: border-box; }
-body {
-  margin: 0;
-  min-height: 100vh;
-  background: #f7f3ef;
-  color: #2d3e39;
-  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC",
-               "Microsoft YaHei", sans-serif;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-}
-.card {
-  width: min(430px, 100%);
-  background: rgba(255,255,255,.92);
-  border-radius: 24px;
-  padding: 26px 22px;
-  box-shadow: 0 10px 35px rgba(50,60,55,.10);
-}
-h1 {
-  margin: 0 0 8px;
-  font-size: 22px;
-}
-.sub {
-  color: #71847d;
-  font-size: 13px;
-  margin-bottom: 22px;
-}
-.state {
-  padding: 16px;
-  background: #f4f7f5;
-  border-radius: 16px;
-  margin-bottom: 18px;
-}
-#status {
-  font-size: 17px;
-  font-weight: 600;
-}
-#detail {
-  margin-top: 7px;
-  font-size: 12px;
-  color: #71847d;
-  line-height: 1.6;
-}
-input {
-  width: 100%;
-  border: 1px solid #d7dfdc;
-  border-radius: 13px;
-  padding: 13px 14px;
-  font-size: 14px;
-  background: white;
-  margin-bottom: 12px;
-}
-button {
-  width: 100%;
-  border: 0;
-  border-radius: 16px;
-  padding: 15px;
-  font-size: 16px;
-  font-weight: 600;
-  cursor: pointer;
-}
-button:disabled { opacity: .55; }
-.start {
-  background: #2d5a4e;
-  color: white;
-}
-.stop {
-  background: #8d5555;
-  color: white;
-}
-.small {
-  margin-top: 10px;
-  background: #edf1ef;
-  color: #4b625b;
-  padding: 11px;
-  font-size: 13px;
-}
-.note {
-  margin-top: 17px;
-  font-size: 12px;
-  color: #84958f;
-  text-align: center;
-  line-height: 1.6;
-}
-#error {
-  color: #a24747;
-  font-size: 12px;
-  margin: 10px 2px 0;
-  min-height: 18px;
-}
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: #111;
+    color: #eee;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    display: flex;
+    justify-content: center;
+    padding: 28px 18px;
+  }
+  .card {
+    width: min(560px, 100%);
+    background: #1b1b1b;
+    border: 1px solid #333;
+    border-radius: 22px;
+    padding: 24px;
+    height: fit-content;
+  }
+  h1 {
+    margin: 0 0 8px;
+    font-size: 26px;
+  }
+  .sub {
+    color: #aaa;
+    margin-bottom: 22px;
+    line-height: 1.6;
+  }
+  label {
+    display: block;
+    color: #bbb;
+    margin: 15px 0 7px;
+    font-size: 14px;
+  }
+  input {
+    width: 100%;
+    border: 1px solid #444;
+    border-radius: 13px;
+    background: #101010;
+    color: #fff;
+    padding: 13px 14px;
+    font-size: 17px;
+    outline: none;
+  }
+  .row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .hint {
+    color: #777;
+    font-size: 12px;
+    margin-top: 6px;
+  }
+  button {
+    width: 100%;
+    border: 0;
+    border-radius: 15px;
+    padding: 15px;
+    margin-top: 16px;
+    font-size: 17px;
+    font-weight: 650;
+    cursor: pointer;
+  }
+  #mainBtn {
+    background: #f1f1f1;
+    color: #111;
+  }
+  #refreshBtn {
+    background: #303030;
+    color: #eee;
+    margin-top: 10px;
+  }
+  #forgetBtn {
+    background: transparent;
+    color: #888;
+    border: 1px solid #333;
+    margin-top: 10px;
+  }
+  .status {
+    margin-top: 22px;
+    padding: 16px;
+    border-radius: 15px;
+    background: #101010;
+    line-height: 1.7;
+  }
+  .state {
+    font-size: 19px;
+    font-weight: 650;
+    margin-bottom: 5px;
+  }
+  .detail {
+    color: #aaa;
+    font-size: 14px;
+    overflow-wrap: anywhere;
+  }
+  .error {
+    color: #d8a3a3;
+  }
 </style>
 </head>
-
 <body>
 <div class="card">
   <h1>掌心窗 · 后台观察</h1>
-  <div class="sub">30 秒一次 · 每次运行 2 分钟</div>
-
-  <div class="state">
-    <div id="status">正在读取状态…</div>
-    <div id="detail"></div>
+  <div class="sub">
+    自己决定多久看一次、总共观察多久。设置会保存在这个浏览器里。
   </div>
 
-  <input
-    id="token"
-    type="password"
-    placeholder="第一次填写 LINJIAN_TOKEN"
-    autocomplete="off"
-  >
+  <label for="token">Token</label>
+  <input id="token" type="password" autocomplete="off" placeholder="输入 LINJIAN_TOKEN">
 
-  <button id="toggle" class="start">开始后台观察 2 分钟</button>
+  <div class="row">
+    <div>
+      <label for="interval">观察间隔（秒）</label>
+      <input id="interval" type="number" min="30" max="3600" step="1" value="60">
+      <div class="hint">30～3600 秒</div>
+    </div>
 
-  <button id="refresh" class="small">刷新状态</button>
-  <button id="forget" class="small">忘记本机保存的 Token</button>
+    <div>
+      <label for="duration">总时长（分钟）</label>
+      <input id="duration" type="number" min="1" max="720" step="1" value="30">
+      <div class="hint">1～720 分钟</div>
+    </div>
+  </div>
 
-  <div id="error"></div>
+  <button id="mainBtn">开始后台观察</button>
+  <button id="refreshBtn">刷新状态</button>
+  <button id="forgetBtn">忘记本页保存的 Token</button>
 
-  <div class="note">
-    Token 只保存在当前浏览器的本地存储中。<br>
-    不会写进网页地址。
+  <div class="status">
+    <div id="state" class="state">尚未读取状态</div>
+    <div id="detail" class="detail"></div>
   </div>
 </div>
 
 <script>
-const KEY = "zhangxinchuang_watch_token_v1";
-
 const tokenEl = document.getElementById("token");
-const toggleEl = document.getElementById("toggle");
-const statusEl = document.getElementById("status");
+const intervalEl = document.getElementById("interval");
+const durationEl = document.getElementById("duration");
+const mainBtn = document.getElementById("mainBtn");
+const refreshBtn = document.getElementById("refreshBtn");
+const forgetBtn = document.getElementById("forgetBtn");
+const stateEl = document.getElementById("state");
 const detailEl = document.getElementById("detail");
-const errorEl = document.getElementById("error");
 
-let running = false;
+tokenEl.value = localStorage.getItem("linjian_watch_token") || "";
+intervalEl.value = localStorage.getItem("linjian_watch_interval") || "60";
+durationEl.value = localStorage.getItem("linjian_watch_duration") || "30";
 
-tokenEl.value = localStorage.getItem(KEY) || "";
+let currentEnabled = false;
 
-function saveToken() {
-  const token = tokenEl.value.trim();
-
-  if (!token) {
-    errorEl.textContent = "第一次使用请先填写 Token。";
-    return false;
-  }
-
-  localStorage.setItem(KEY, token);
-  return true;
+function token() {
+  return tokenEl.value.trim();
 }
 
-async function api(path, options = {}) {
-  if (!saveToken()) return null;
-
-  errorEl.textContent = "";
-
-  const headers = {
-    "X-Auth-Token": tokenEl.value.trim(),
-    ...(options.headers || {})
-  };
-
-  if (options.method === "POST") {
-    headers["Content-Type"] = "application/json";
-  }
-
-  const response = await fetch(path, {
-    ...options,
-    headers
-  });
-
-  const raw = await response.text();
-
-  let data = {};
-  try {
-    data = JSON.parse(raw);
-  } catch (_) {
-    data = { raw };
-  }
-
-  if (!response.ok) {
-    if (response.status === 403) {
-      throw new Error("Token 不正确");
-    }
-
-    throw new Error(
-      data.error || ("服务器返回 HTTP " + response.status)
-    );
-  }
-
-  return data;
+function saveSettings() {
+  localStorage.setItem("linjian_watch_token", token());
+  localStorage.setItem("linjian_watch_interval", intervalEl.value);
+  localStorage.setItem("linjian_watch_duration", durationEl.value);
 }
 
-function renderWatch(watch) {
-  if (!watch) return;
+function headers(json=false) {
+  const h = {"X-Auth-Token": token()};
+  if (json) h["Content-Type"] = "application/json";
+  return h;
+}
 
-  running = !!watch.enabled;
+function clampNumber(el, min, max) {
+  let n = Number(el.value);
+  if (!Number.isFinite(n)) n = min;
+  n = Math.round(n);
+  n = Math.max(min, Math.min(max, n));
+  el.value = String(n);
+  return n;
+}
 
-  statusEl.textContent = running
+function humanRemaining(seconds) {
+  seconds = Math.max(0, Number(seconds || 0));
+  if (seconds < 60) return Math.round(seconds) + " 秒";
+  if (seconds < 3600) return Math.ceil(seconds / 60) + " 分钟";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.ceil((seconds % 3600) / 60);
+  return m ? `${h} 小时 ${m} 分钟` : `${h} 小时`;
+}
+
+function render(data) {
+  const w = data.watch || data;
+  currentEnabled = !!w.enabled;
+
+  stateEl.textContent = currentEnabled
     ? "正在后台观察"
-    : "当前未运行";
+    : "后台观察已停止";
 
-  toggleEl.textContent = running
+  mainBtn.textContent = currentEnabled
     ? "停止后台观察"
-    : "开始后台观察 2 分钟";
-
-  toggleEl.className = running ? "stop" : "start";
+    : "开始后台观察";
 
   const parts = [];
 
-  if (watch.interval_seconds) {
-    parts.push("间隔 " + watch.interval_seconds + " 秒");
-  }
+  if (w.interval_seconds != null)
+    parts.push(`间隔 ${w.interval_seconds} 秒`);
 
-  if (typeof watch.peek_count === "number") {
-    parts.push("已观察 " + watch.peek_count + " 次");
-  }
+  if (currentEnabled && w.remaining_seconds != null)
+    parts.push(`剩余约 ${humanRemaining(w.remaining_seconds)}`);
 
-  if (typeof watch.remaining_seconds === "number" &&
-      watch.remaining_seconds > 0) {
-    parts.push("剩余约 " + Math.ceil(watch.remaining_seconds) + " 秒");
-  }
+  if (w.peek_count != null)
+    parts.push(`已观察 ${w.peek_count} 次`);
 
-  if (watch.last_skip_reason) {
-    parts.push("最近状态：" + watch.last_skip_reason);
-  }
+  if (w.last_skip_reason)
+    parts.push(`最近状态：${w.last_skip_reason}`);
 
-  detailEl.textContent = parts.join(" · ");
+  detailEl.textContent = parts.join(" · ") || "状态已读取";
+  detailEl.classList.remove("error");
 }
 
-async function refreshStatus(silent = false) {
-  if (!tokenEl.value.trim()) {
-    statusEl.textContent = "第一次使用，请填写 Token";
+async function refreshStatus() {
+  if (!token()) {
+    stateEl.textContent = "请先填写 Token";
     detailEl.textContent = "";
+    currentEnabled = false;
+    mainBtn.textContent = "开始后台观察";
     return;
   }
 
+  saveSettings();
+
   try {
-    const data = await api("/api/watch/status", {
-      method: "GET"
+    const r = await fetch("/api/watch/status", {
+      method: "GET",
+      headers: headers()
     });
 
-    if (data) renderWatch(data.watch || data);
+    const data = await r.json();
+
+    if (!r.ok || data.ok === false)
+      throw new Error(data.error || `HTTP ${r.status}`);
+
+    render(data);
   } catch (e) {
-    if (!silent) errorEl.textContent = e.message;
+    stateEl.textContent = "读取状态失败";
+    detailEl.textContent = String(e);
+    detailEl.classList.add("error");
   }
 }
 
-async function toggleWatch() {
-  toggleEl.disabled = true;
+async function startWatch() {
+  const interval = clampNumber(intervalEl, 30, 3600);
+  const duration = clampNumber(durationEl, 1, 720);
+
+  if (!token()) {
+    stateEl.textContent = "请先填写 Token";
+    return;
+  }
+
+  saveSettings();
+
+  stateEl.textContent = "正在启动……";
+  detailEl.textContent = `每 ${interval} 秒一次 · 持续 ${duration} 分钟`;
 
   try {
-    let data;
+    const r = await fetch("/api/watch/start", {
+      method: "POST",
+      headers: headers(true),
+      body: JSON.stringify({
+        interval_seconds: interval,
+        duration_minutes: duration
+      })
+    });
 
-    if (running) {
-      data = await api("/api/watch/stop", {
-        method: "POST",
-        body: "{}"
-      });
-    } else {
-      data = await api("/api/watch/start", {
-        method: "POST",
-        body: JSON.stringify({
-          interval_seconds: 30,
-          duration_minutes: 2
-        })
-      });
-    }
+    const data = await r.json();
 
-    if (data) {
-      renderWatch(data.watch || data);
-      await refreshStatus(true);
-    }
+    if (!r.ok || data.ok === false)
+      throw new Error(data.error || `HTTP ${r.status}`);
 
+    render(data);
   } catch (e) {
-    errorEl.textContent = e.message;
-  } finally {
-    toggleEl.disabled = false;
+    stateEl.textContent = "启动失败";
+    detailEl.textContent = String(e);
+    detailEl.classList.add("error");
   }
 }
 
-toggleEl.addEventListener("click", toggleWatch);
-
-document.getElementById("refresh").addEventListener(
-  "click",
-  () => refreshStatus(false)
-);
-
-document.getElementById("forget").addEventListener(
-  "click",
-  () => {
-    localStorage.removeItem(KEY);
-    tokenEl.value = "";
-    running = false;
-    statusEl.textContent = "Token 已从这个浏览器删除";
-    detailEl.textContent = "";
-    toggleEl.textContent = "开始后台观察 2 分钟";
-    toggleEl.className = "start";
-    errorEl.textContent = "";
+async function stopWatch() {
+  if (!token()) {
+    stateEl.textContent = "请先填写 Token";
+    return;
   }
-);
 
-tokenEl.addEventListener("change", () => {
-  if (tokenEl.value.trim()) {
-    localStorage.setItem(KEY, tokenEl.value.trim());
-    refreshStatus(false);
+  saveSettings();
+  stateEl.textContent = "正在停止……";
+
+  try {
+    const r = await fetch("/api/watch/stop", {
+      method: "POST",
+      headers: headers(true),
+      body: "{}"
+    });
+
+    const data = await r.json();
+
+    if (!r.ok || data.ok === false)
+      throw new Error(data.error || `HTTP ${r.status}`);
+
+    render(data);
+  } catch (e) {
+    stateEl.textContent = "停止失败";
+    detailEl.textContent = String(e);
+    detailEl.classList.add("error");
   }
+}
+
+mainBtn.addEventListener("click", async () => {
+  if (currentEnabled) await stopWatch();
+  else await startWatch();
 });
 
-if (tokenEl.value.trim()) {
-  refreshStatus(true);
-} else {
-  statusEl.textContent = "第一次使用，请填写 Token";
-}
+refreshBtn.addEventListener("click", refreshStatus);
 
-setInterval(() => {
-  if (tokenEl.value.trim()) {
-    refreshStatus(true);
-  }
-}, 10000);
+forgetBtn.addEventListener("click", () => {
+  localStorage.removeItem("linjian_watch_token");
+  tokenEl.value = "";
+  stateEl.textContent = "已忘记本页保存的 Token";
+  detailEl.textContent = "";
+});
+
+intervalEl.addEventListener("change", saveSettings);
+durationEl.addEventListener("change", saveSettings);
+tokenEl.addEventListener("change", saveSettings);
+
+refreshStatus();
+setInterval(refreshStatus, 10000);
 </script>
 </body>
 </html>
