@@ -492,6 +492,20 @@ def _strip_json_fence(text: str) -> str:
     return text
 
 
+def _extract_tag(text: str, tag: str) -> str:
+    text = text or ""
+    start = f"<{tag}>"
+    end = f"</{tag}>"
+    i = text.find(start)
+    if i < 0:
+        return ""
+    i += len(start)
+    j = text.find(end, i)
+    if j < 0:
+        return ""
+    return text[i:j].strip()
+
+
 def execute_watch_decision(state, action: str, message: str = "") -> None:
     action = str(action or "").strip().lower()
     if action not in ("notify", "guidian"):
@@ -641,12 +655,12 @@ def analyze_watch_screenshot(state, shot: Path) -> None:
             "你在一个由用户本人明确开启的手机屏幕观察器中工作。"
             "只根据当前截图和提供的上一轮摘要判断，不要臆测截图之外的事实。"
             "现在只做观察和判断，不真正执行手机动作。"
-            "必须只输出一个 JSON 对象，不要 Markdown，不要代码围栏。"
-            '格式为：{"action":"continue|notify|guidian",'
-            '"summary":"一句到两句描述当前正在发生什么",'
-            '"reason":"为什么作出这个判断",'
-            '"visible_text_sample":"从截图正文中逐字抄一段最有辨识度的可见文字，最多80字；看不清则为空字符串；严禁根据应用名、包名或上一轮摘要推测",'
-            '"message":"如果 action 不是 continue，建议发送给用户的话；否则为空字符串"}。'
+            "必须严格按下面五行标签格式输出，不要 JSON，不要 Markdown，不要代码围栏，也不要添加其他文字："
+            "<action>continue 或 notify 或 guidian</action>\n"
+            "<summary>一句到两句描述当前正在发生什么</summary>\n"
+            "<reason>为什么作出这个判断</reason>\n"
+            "<visible_text_sample>从截图正文中逐字抄一段最有辨识度的可见文字，最多80字；看不清则留空；严禁根据应用名、包名或上一轮摘要推测</visible_text_sample>\n"
+            "<message>如果 action 不是 continue，写建议发送给用户的话；否则留空</message>。"
             "普通、稳定、无需打扰的情况优先 continue。"
             "只有当前确实有一句自然、具体的提醒值得发给用户时才选择 notify。"
             "只有明显需要把用户主动叫回掌心窗时才选择 guidian；普通聊天、正常使用手机、拿不准时都选择 continue。"
@@ -711,19 +725,24 @@ def analyze_watch_screenshot(state, shot: Path) -> None:
                 if isinstance(x, dict)
             )
 
-        parsed = json.loads(_strip_json_fence(str(content)))
+        raw_content = _strip_json_fence(str(content))
 
-        action = str(parsed.get("action") or "continue").strip().lower()
+        action = _extract_tag(raw_content, "action").strip().lower() or "continue"
         if action not in ("continue", "notify", "guidian"):
             action = "continue"
 
-        message = str(parsed.get("message") or "")[:500]
-        visible_text_sample = str(parsed.get("visible_text_sample") or "")[:200]
+        summary = _extract_tag(raw_content, "summary")[:500]
+        reason = _extract_tag(raw_content, "reason")[:500]
+        message = _extract_tag(raw_content, "message")[:500]
+        visible_text_sample = _extract_tag(raw_content, "visible_text_sample")[:200]
+
+        if not summary and not reason and not visible_text_sample:
+            raise ValueError("无法解析 Opus 标签输出: " + raw_content[:240])
 
         with state.watch_lock:
-            state.watch_ai_last_summary = str(parsed.get("summary") or "")[:500]
+            state.watch_ai_last_summary = summary
             state.watch_ai_last_action = action
-            state.watch_ai_last_reason = str(parsed.get("reason") or "")[:500]
+            state.watch_ai_last_reason = reason
             state.watch_ai_last_message = message
             state.watch_ai_visible_text_sample = visible_text_sample
             state.watch_ai_last_error = ""
